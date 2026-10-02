@@ -1,0 +1,64 @@
+# Share config schema for sap-bdc-medallion-cdc.
+# One file per catalog-linked database schema. Draft one with
+#   scripts/profile_share.py --database <CLD> --out config.yaml
+# then complete and verify it (scripts/verify_grain.py) before rendering.
+
+target_database: SAP_MATERIAL_360        # created if absent; holds CAPTURE_CONTROL, BRONZE, SILVER, GOLD
+warehouse: COMPUTE_WH                    # used by dynamic tables and tasks
+
+source:
+  database: PRODUCT_V1                   # the catalog-linked database itself - never a copy
+  schema: product                        # quoted automatically; one config per schema
+  track: STANDARD                        # STANDARD | CUSTOM  (from readiness.py / profile_share.py)
+
+  # STANDARD track only: the 32-hex suffix of load_type_<hash> / run_id_<hash>.
+  # It names the replication flow and changes when SAP re-publishes the product.
+  flow_hash: 0123456789abcdef0123456789abcdef
+
+  # CUSTOM track only: the replication timestamp the pipeline owner exposed.
+  # watermark_column: ZZLASTCHGDATE
+
+schedule:
+  capture: 15 MINUTE                     # TSK_CAPTURE_CYCLE; the poll is free, so set by business need
+  assurance: USING CRON 0 6 * * * UTC    # TSK_DAILY_ASSURANCE: validate + reconcile
+
+objects:
+  - name: PRODUCT                        # upper-case object name; Silver becomes SILVER.DT_PRODUCT
+    table: product                       # table name on the share, as shown by SHOW TABLES
+    keys: [Product]                      # VERIFIED full grain (verify_grain.py must PASS)
+    class: MASTER                        # MASTER | TRANSACTION | EMPTY
+    # target_lag: 24 hours               # default: MASTER 24 hours, TRANSACTION 1 hour (a backstop)
+    # comment: Product master
+    # verified: 12,345 rows / 12,345 keys
+    flags:                               # optional deterministic Silver columns - check types first
+      - name: IS_MARKED_FOR_DELETION
+        expr: COALESCE("IsMarkedForDeletion", FALSE)          # BOOLEAN column
+      - name: IS_CROSS_PLANT_BLOCKED
+        expr: IFF(COALESCE("CrossPlantStatus", '') <> '', TRUE, FALSE)   # VARCHAR indicator
+
+  - name: PRODUCTPLANT
+    table: productplant
+    keys: [Product, Plant]
+    class: MASTER
+
+  - name: PRODUCTSTORAGELOCATION
+    table: productstoragelocation
+    keys: [Product, Plant, StorageLocation]
+    nullable_keys: [StorageLocation]     # COALESCEd to '~' so a NULL does not form its own partition
+    class: MASTER
+
+  - name: PRODUCTSALESTAX
+    table: productsalestax
+    keys: [Product, Country, TaxCategory]
+    class: EMPTY                         # Bronze view only - no dynamic table, not polled
+
+# Optional: report child rows whose key is missing from the master.
+referential_integrity:
+  master: PRODUCT
+  key_columns: [Product]
+  children: [PRODUCTPLANT, PRODUCTSTORAGELOCATION]
+
+# Optional: hand-written Gold, rendered with the same variables ({{ T }}, {{ WH }}).
+gold:
+  # template: gold.sql.j2                # path relative to this config file
+  dynamic_tables: []                     # e.g. [GOLD.DIM_PRODUCT_360] - refreshed by SP_CAPTURE_CYCLE

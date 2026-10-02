@@ -1,0 +1,117 @@
+# Worked example: the SAP BDC standard data product CUSTOMER_V1 (customer master).
+#
+# Every key below was verified on a live share with verify_grain.py
+# (rows = distinct key combinations). Row counts are from the reference tenant
+# and will differ on yours; re-verify before deploying.
+
+target_database: SAP_CUSTOMER_360
+warehouse: COMPUTE_WH
+# Capture must run as a role that sees UNMASKED key columns - see references/masking.md
+
+
+source:
+  database: CUSTOMER_V1            # the catalog-linked database itself - never a copy
+  schema: customer
+  track: STANDARD                  # STANDARD = __OPERATION_TYPE/__TIMESTAMP present
+  flow_hash: 8995a2862a8343bd8390aaa82c46e881   # suffix of load_type_<hash>; names the product
+
+schedule:
+  capture: 15 MINUTE
+  assurance: USING CRON 0 6 * * * UTC
+
+objects:
+  - name: CUSTOMER
+    table: customer
+    keys: [Customer]
+    class: MASTER
+    verified: 3,355 rows / 3,355 keys
+    comment: Customer master, de-duplicated on Customer
+    flags:
+      # Mixed types in ONE table: DeletionIndicator / PostingIsBlocked /
+      # PaymentIsBlockedForCustomer are BOOLEAN, the others TEXT.
+      - name: IS_FLAGGED_DELETED
+        expr: COALESCE("DeletionIndicator", FALSE)
+      - name: IS_BLOCKED_ANY
+        expr: >-
+          IFF(COALESCE("DeliveryIsBlocked", '') <> ''
+          OR COALESCE("BillingIsBlockedForCustomer", '') <> ''
+          OR COALESCE("OrderIsBlockedForCustomer", '') <> ''
+          OR COALESCE("PaymentIsBlockedForCustomer", FALSE)
+          OR COALESCE("PostingIsBlocked", FALSE), TRUE, FALSE)
+      - name: DQ_NAME_MISSING
+        expr: IFF(COALESCE("CustomerName", '') = '', TRUE, FALSE)
+      - name: DQ_COUNTRY_MISSING
+        expr: IFF(COALESCE("Country", '') = '', TRUE, FALSE)
+
+  - name: CUSTOMERCOMPANYCODE
+    table: customercompanycode
+    keys: [Customer, CompanyCode]
+    class: MASTER
+    verified: 10,549 rows / 10,549 keys
+    flags:
+      - name: IS_FLAGGED_DELETED
+        expr: COALESCE("DeletionIndicator", FALSE)
+      - name: IS_PAYMENT_BLOCKED
+        expr: >-
+          IFF(COALESCE("PaymentBlockingReason", '') <> ''
+          OR COALESCE("CustomerPaymentBlockingReason", '') <> '', TRUE, FALSE)
+      - name: IS_DUNNING_BLOCKED
+        expr: IFF(COALESCE("DunningBlock", '') <> '', TRUE, FALSE)
+
+  - name: CUSTOMERSALESAREA
+    table: customersalesarea
+    keys: [Customer, SalesOrganization, DistributionChannel, Division]
+    class: MASTER
+    verified: 14,097 rows / 14,097 keys
+    flags:
+      - name: IS_FLAGGED_DELETED
+        expr: COALESCE("DeletionIndicator", FALSE)
+      - name: IS_SALES_BLOCKED
+        expr: >-
+          IFF(COALESCE("OrderIsBlockedForCustomer", '') <> ''
+          OR COALESCE("DeliveryIsBlockedForCustomer", '') <> ''
+          OR COALESCE("BillingIsBlockedForCustomer", '') <> ''
+          OR COALESCE("SalesBlockForCustomer", '') <> '', TRUE, FALSE)
+
+  # The grain that proves the point: the intuitive four-part sales-area key
+  # collapses 39,462 rows to 14,017 (64% silently lost). It needs six parts.
+  - name: CUSTOMERSALESAREATAX
+    table: customersalesareatax
+    keys: [Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory]
+    nullable_keys: [DepartureCountry, CustomerTaxCategory]
+    class: MASTER
+    verified: 39,462 rows / 39,462 keys (six-part key)
+
+  - name: CUSTOMERDUNNING
+    table: customerdunning
+    keys: [CompanyCode, Customer, DunningArea]
+    class: MASTER
+    verified: 17 rows / 17 keys
+    flags:
+      - name: IS_DUNNING_BLOCKED
+        expr: IFF(COALESCE("DunningBlock", '') <> '', TRUE, FALSE)
+      - name: DUNNING_LEVEL_NUM
+        expr: TRY_TO_NUMBER("DunningLevel")
+
+  # These two were EMPTY at first build and were later populated by SAP.
+  # verify_grain.py flags that change; class EMPTY keeps an object as a
+  # Bronze view only (no dynamic table, no polling).
+  - name: CUSTOMERUNLOADINGPOINT
+    table: customerunloadingpoint
+    keys: [Customer, UnloadingPointName]
+    class: MASTER
+  - name: CUSTOMERWITHHOLDINGTAX
+    table: customerwithholdingtax
+    keys: [Customer, CompanyCode, WithholdingTaxType]
+    class: MASTER
+
+referential_integrity:
+  master: CUSTOMER
+  key_columns: [Customer]
+  children: [CUSTOMERCOMPANYCODE, CUSTOMERSALESAREA, CUSTOMERSALESAREATAX, CUSTOMERDUNNING]
+
+gold:
+  template: gold.sql.j2            # hand-written, domain specific; rendered with the same variables
+  dynamic_tables:
+    - GOLD.DIM_CUSTOMER_360
+    - GOLD.BRG_CUSTOMER_SALES_AREA
