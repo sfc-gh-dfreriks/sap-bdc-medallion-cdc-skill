@@ -19,7 +19,8 @@ watermark SAP already writes. Background: `references/how-it-works.md`.
 
 - A Snowflake connection (`~/.snowflake/connections.toml`) and a warehouse.
 - At least one catalog-linked database created by BDC Connect.
-- Python 3.10+: `pip install -r <SKILL_DIR>/requirements.txt`
+- Python 3.10+ with `pip install -r <SKILL_DIR>/requirements.txt` — check with
+  `python3 -c "import snowflake.connector, jinja2, yaml"` and install if it fails.
 - A **capture role** that sees unmasked key columns and holds Iceberg-table and
   connector grants — see `references/masking-and-privileges.md`. This is the
   most common reason a build looks healthy and is wrong.

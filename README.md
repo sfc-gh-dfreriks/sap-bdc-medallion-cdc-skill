@@ -23,8 +23,12 @@ CUSTOMER_V1 share"*. The skill then:
 
 ```bash
 cortex skill add sfc-gh-dfreriks/sap-bdc-medallion-cdc-skill
-pip install -r ~/.snowflake/cortex/skills/sap-bdc-medallion-cdc/requirements.txt   # path shown by `cortex skill list`
+cortex skill list | grep sap-bdc-medallion-cdc        # shows where the skill was installed
+pip install -r <that path>/requirements.txt
 ```
+
+Update later with `cortex skill update sfc-gh-dfreriks/sap-bdc-medallion-cdc-skill`.
+Cortex Code can also install the Python requirements for you on first use.
 
 Then in Cortex Code:
 
