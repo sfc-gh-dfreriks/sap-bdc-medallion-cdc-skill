@@ -14,7 +14,9 @@
         back to FULL, and one FULL object forces everything downstream to FULL.
      2. No SYSDATE() / CURRENT_TIMESTAMP() / CURRENT_DATE(). One
         non-deterministic expression blocks incremental refresh outright.
-     3. De-duplicate on the VERIFIED grain. Nullable key parts are COALESCEd so
+     3. De-duplicate on the VERIFIED grain — the primary key SAP declares where
+        there is one (RELY, not enforced, so still verified), inferred only where
+        none is declared. Each table's COMMENT states which. Nullable key parts are COALESCEd so
         a NULL does not form its own partition.
      4. ORDER BY the raw watermark, never a parsed expression.
 
@@ -25,12 +27,12 @@
 
 USE DATABASE SAP_CUSTOMER_360;
 
-/* --- CUSTOMER. Grain: Customer. Verified 3,355 rows / 3,355 keys. --- */
+/* --- CUSTOMER. Grain: Customer (declared). Verified 3,450 rows / 3,450 keys. --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMER
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'Customer master, de-duplicated on Customer. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'Customer master, de-duplicated on Customer. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -47,12 +49,12 @@ FROM BRONZE.V_CUSTOMER
 QUALIFY ROW_NUMBER() OVER (PARTITION BY "Customer"
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERCOMPANYCODE. Grain: Customer, CompanyCode. Verified 10,549 rows / 10,549 keys. --- */
+/* --- CUSTOMERCOMPANYCODE. Grain: Customer, CompanyCode (declared). Verified 10,615 rows / 10,615 keys. --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERCOMPANYCODE
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERCOMPANYCODE de-duplicated on Customer, CompanyCode. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERCOMPANYCODE de-duplicated on Customer, CompanyCode. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -69,12 +71,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY "Customer",
                                         "CompanyCode"
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERSALESAREA. Grain: Customer, SalesOrganization, DistributionChannel, Division. Verified 14,097 rows / 14,097 keys. --- */
+/* --- CUSTOMERSALESAREA. Grain: Customer, SalesOrganization, DistributionChannel, Division (declared). Verified 14,175 rows / 14,175 keys. --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERSALESAREA
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERSALESAREA de-duplicated on Customer, SalesOrganization, DistributionChannel, Division. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERSALESAREA de-duplicated on Customer, SalesOrganization, DistributionChannel, Division. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -92,12 +94,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY "Customer",
                                         "Division"
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERSALESAREATAX. Grain: Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory. Verified 39,462 rows / 39,462 keys (six-part key). --- */
+/* --- CUSTOMERSALESAREATAX. Grain: Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory (declared). Verified 43,085 rows / 43,085 keys (six-part declared key). --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERSALESAREATAX
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERSALESAREATAX de-duplicated on Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERSALESAREATAX de-duplicated on Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -115,12 +117,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY "Customer",
                                         COALESCE("CustomerTaxCategory", '~')
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERDUNNING. Grain: CompanyCode, Customer, DunningArea. Verified 17 rows / 17 keys. --- */
+/* --- CUSTOMERDUNNING. Grain: CompanyCode, Customer, DunningArea (declared). Verified 30 rows / 30 keys. --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERDUNNING
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERDUNNING de-duplicated on CompanyCode, Customer, DunningArea. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERDUNNING de-duplicated on CompanyCode, Customer, DunningArea. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -137,12 +139,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY "CompanyCode",
                                         "DunningArea"
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERUNLOADINGPOINT. Grain: Customer, UnloadingPointName. --- */
+/* --- CUSTOMERUNLOADINGPOINT. Grain: Customer, UnloadingPointName (declared). --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERUNLOADINGPOINT
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERUNLOADINGPOINT de-duplicated on Customer, UnloadingPointName. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERUNLOADINGPOINT de-duplicated on Customer, UnloadingPointName. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),
@@ -156,12 +158,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY "Customer",
                                         "UnloadingPointName"
                            ORDER BY "__TIMESTAMP" DESC) = 1;
 
-/* --- CUSTOMERWITHHOLDINGTAX. Grain: Customer, CompanyCode, WithholdingTaxType. --- */
+/* --- CUSTOMERWITHHOLDINGTAX. Grain: Customer, CompanyCode, WithholdingTaxType (declared). --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_CUSTOMERWITHHOLDINGTAX
   TARGET_LAG   = '24 hours'
   WAREHOUSE    = COMPUTE_WH
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = 'CUSTOMERWITHHOLDINGTAX de-duplicated on Customer, CompanyCode, WithholdingTaxType. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = 'CUSTOMERWITHHOLDINGTAX de-duplicated on Customer, CompanyCode, WithholdingTaxType. Key source: declared primary key constraint on the share (RELY, verified). Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
     * EXCLUDE ("__OPERATION_TYPE", "__TIMESTAMP", LOAD_TYPE, RUN_ID, CDC_TIMESTAMP_UTC),

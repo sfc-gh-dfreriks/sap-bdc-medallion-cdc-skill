@@ -14,7 +14,9 @@
         back to FULL, and one FULL object forces everything downstream to FULL.
      2. No SYSDATE() / CURRENT_TIMESTAMP() / CURRENT_DATE(). One
         non-deterministic expression blocks incremental refresh outright.
-     3. De-duplicate on the VERIFIED grain. Nullable key parts are COALESCEd so
+     3. De-duplicate on the VERIFIED grain — the primary key SAP declares where
+        there is one (RELY, not enforced, so still verified), inferred only where
+        none is declared. Each table's COMMENT states which. Nullable key parts are COALESCEd so
         a NULL does not form its own partition.
      4. ORDER BY the raw watermark, never a parsed expression.
 
@@ -25,12 +27,12 @@
 
 USE DATABASE {{ T }};
 {% for o in objects if o.cls != 'EMPTY' %}
-/* --- {{ o.name }}. Grain: {{ o.key_cols | join(", ") }}.{% if o.verified %} Verified {{ o.verified }}.{% endif %} --- */
+/* --- {{ o.name }}. Grain: {{ o.key_cols | join(", ") }} ({{ o.key_source }}{{ ", override: " ~ o.key_override_reason if o.key_override }}).{% if o.verified %} Verified {{ o.verified }}.{% endif %} --- */
 CREATE OR REPLACE DYNAMIC TABLE SILVER.DT_{{ o.name }}
   TARGET_LAG   = '{{ o.target_lag }}'
   WAREHOUSE    = {{ WH }}
   REFRESH_MODE = INCREMENTAL
-  COMMENT      = '{{ (o.comment or (o.name ~ " de-duplicated on " ~ (o.key_cols | join(", ")))) | sqlstr }}. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
+  COMMENT      = '{{ (o.comment or (o.name ~ " de-duplicated on " ~ (o.key_cols | join(", ")))) | sqlstr }}. Key source: {{ ("override of the declared key (" ~ o.key_override_reason ~ ")") | sqlstr if o.key_override else ("declared primary key constraint on the share (RELY, verified)" if o.key_source == "declared" else "inferred - no key declared on the share (verified)") }}. Refresh driven by CAPTURE_CONTROL.SP_CAPTURE_CYCLE; the lag is a backstop.'
 AS
 SELECT
 {%- if src.track == 'STANDARD' %}

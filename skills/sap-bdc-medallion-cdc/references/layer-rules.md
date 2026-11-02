@@ -22,8 +22,15 @@
    without error, and a FULL table forces everything downstream to FULL.
 2. **No `SYSDATE()`, `CURRENT_TIMESTAMP()`, `CURRENT_DATE()`** in any dynamic
    table. One blocks incremental refresh. Time-relative logic goes in a plain view.
-3. **De-duplicate on the verified grain.** `verify_grain.py` must PASS for the
-   role that will own Silver (see masking-and-privileges.md). List key parts
+3. **De-duplicate on the verified grain.** Use the primary key SAP declares
+   on the catalog-linked table (`SHOW PRIMARY KEYS`; `profile_share.py` copies
+   it into the config with `key_source: declared`). It is `RELY` — asserted by
+   SAP, not enforced by Snowflake — so `verify_grain.py` must still PASS for the
+   role that will own Silver (see masking-and-privileges.md); a config key that
+   differs from the declaration is `DRIFT`, a declaration that is not unique is
+   `VIOLATED`. Infer a key (`key_source: inferred`) only where none is declared,
+   which today means custom data products. Each Silver table's COMMENT states
+   the key source. List key parts
    that can be NULL under `nullable_keys` so they are COALESCEd to `'~'`.
 4. **ORDER BY the raw watermark**, not a parsed expression.
 
@@ -48,6 +55,21 @@ Object classes:
 | `EMPTY` | none — Bronze view only | no | — |
 
 `verify_grain.py` reports `POPULATED` when an EMPTY object starts carrying rows.
+
+## Changes: an I/U/D log on Silver (optional)
+
+`cdc_log: true` (globally or per object) adds `60_changes.sql`: a standard
+stream on each Silver dynamic table, `CHANGES.CHANGE_LOG`, and
+`CHANGES.SP_DRAIN_CHANGES()`. An incremental refresh writes a changed row as a
+DELETE plus an INSERT and `METADATA$ISUPDATE` is always FALSE on this path, so
+the drain pairs the two on the key and compares a hash of the business columns
+(lineage `CDC_*` columns excluded): different hash = `U`, INSERT only = `I`,
+DELETE only = `D`, same hash = re-delivery, dropped. This is only correct on the
+true grain — another reason to use the declared key. The stream read and the
+log write share one committed transaction. No task is created: schedule the
+drain yourself (create any task SUSPENDED), often enough that the stream does
+not go stale, and re-run `60_changes.sql` after re-running `30_silver.sql`
+(replacing a dynamic table invalidates its stream).
 
 ## Gold: hand-written, domain specific
 

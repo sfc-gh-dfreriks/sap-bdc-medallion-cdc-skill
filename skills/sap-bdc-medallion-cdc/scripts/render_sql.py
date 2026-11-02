@@ -4,8 +4,9 @@
     python3 render_sql.py <config.yaml> [--out <dir>]
 
 Reads a share config (see config/example.yaml), validates it, and writes
-10_control.sql, 20_bronze.sql, 30_silver.sql, 40_gold.sql and 50_ops.sql to
---out (default: ./generated next to the config). No Snowflake connection is
+10_control.sql, 20_bronze.sql, 30_silver.sql, 40_gold.sql, 50_ops.sql and,
+when any object sets `cdc_log: true`, 60_changes.sql to --out (default:
+./generated next to the config). No Snowflake connection is
 needed, and the output is deterministic: the same config always renders the
 same SQL, so the generated files can be reviewed and diffed like code.
 """
@@ -26,6 +27,7 @@ HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / "templates"
 
 CLASSES = {"MASTER", "TRANSACTION", "EMPTY"}
+KEY_SOURCES = {"declared", "inferred"}
 DEFAULT_LAG = {"MASTER": "24 hours", "TRANSACTION": "1 hour", "EMPTY": None}
 # Fixed-width, zero-padded text form of a TIMESTAMP, so text order is time order.
 CUSTOM_TEXT_FMT = "YYYY-MM-DD\"T\"HH24:MI:SS.FF9"
@@ -83,6 +85,7 @@ def build_context(cfg: dict, config_path: Path) -> dict:
             fail("custom track needs source.watermark_column (e.g. ZZLASTCHGDATE)")
         src["watermark_column"] = wm
 
+    cdc_default = bool(cfg.get("cdc_log", False))
     objects, seen = [], set()
     for raw in cfg["objects"]:
         name = str(raw["name"]).upper()
@@ -95,6 +98,13 @@ def build_context(cfg: dict, config_path: Path) -> dict:
         cls = str(raw.get("class", "MASTER")).upper()
         if cls not in CLASSES:
             fail(f"{name}: class must be one of {sorted(CLASSES)}")
+        key_source = str(raw.get("key_source") or "inferred").lower()
+        if key_source not in KEY_SOURCES:
+            fail(f"{name}: key_source must be one of {sorted(KEY_SOURCES)}")
+        override = bool(raw.get("key_override", False))
+        if override and not raw.get("key_override_reason"):
+            fail(f"{name}: key_override needs key_override_reason")
+        cdc_log = bool(raw.get("cdc_log", cdc_default)) and cls != "EMPTY"
         nullable = set(raw.get("nullable_keys") or [])
         parts = [f"COALESCE({q(k)}, '~')" if k in nullable else q(k) for k in keys]
         wm = q(src["watermark_column"])
@@ -109,6 +119,11 @@ def build_context(cfg: dict, config_path: Path) -> dict:
             "table": raw["table"],
             "source_fqn": f'{src["database"]}.{src["schema_q"]}.{q(raw["table"])}',
             "key_cols": keys,
+            "key_source": key_source,
+            "key_override": override,
+            "key_override_reason": raw.get("key_override_reason"),
+            "cdc_log": cdc_log,
+            "key_json": ", ".join(f"'{sqlstr(k)}', {q(k)}" for k in keys),
             "nullable_keys": sorted(nullable),
             "partition_by": ",\n                                        ".join(parts),
             "cls": cls,
@@ -149,6 +164,7 @@ def build_context(cfg: dict, config_path: Path) -> dict:
         "src": src,
         "objects": objects,
         "ri": ri,
+        "cdc_objects": [o for o in objects if o["cdc_log"]],
         "gold_dts": gold.get("dynamic_tables", []),
         "gold_template": gold.get("template"),
         "schedule": {
@@ -190,6 +206,12 @@ def render(cfg_path: Path, out: Path) -> list[Path]:
         path = out / f"{name}.sql"
         path.write_text(text.rstrip() + "\n")
         written.append(path)
+    changes = out / "60_changes.sql"
+    if ctx["cdc_objects"]:
+        changes.write_text(env.get_template("60_changes.sql.j2").render(**ctx).rstrip() + "\n")
+        written.append(changes)
+    elif changes.exists():
+        changes.unlink()   # cdc_log turned off: a stale file would still deploy
     gold = out / "40_gold.sql"
     if ctx["gold_template"]:
         gold.write_text(env.get_template(ctx["gold_template"]).render(**ctx).rstrip() + "\n")

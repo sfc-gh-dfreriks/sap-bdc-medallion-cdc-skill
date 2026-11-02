@@ -1,6 +1,6 @@
 ---
 name: sap-bdc-medallion-cdc
-description: "Build change data capture and a Bronze/Silver/Gold medallion over SAP Business Data Cloud (BDC) catalog-linked (zero-copy) shares in Snowflake: readiness assessment, standard vs custom CDC track, grain verification, masking/privilege gate, generated SQL for control plane, Bronze views, incremental Silver dynamic tables, Gold marts, polling, reload detection and reconciliation. Use when: CDC on SAP BDC data products, incremental capture from a catalog-linked database, medallion over a BDC share, Silver/Gold dynamic tables on SAP data, data is a day behind, streams or CHANGES refused on BDC tables. Triggers: SAP BDC CDC, BDC medallion, catalog-linked database CDC, zero-copy CDC, __OPERATION_TYPE, __TIMESTAMP, ZZLASTCHGDATE, load_type, BDC Connect dynamic tables, incremental refresh SAP share, bronze silver gold SAP BDC."
+description: "Build change data capture and a Bronze/Silver/Gold medallion over SAP Business Data Cloud (BDC) catalog-linked (zero-copy) shares in Snowflake: readiness assessment, standard vs custom CDC track, declared primary keys and grain verification, masking/privilege gate, generated SQL for control plane, Bronze views, incremental Silver dynamic tables, Gold marts, polling, reload detection, key drift, reconciliation and an optional I/U/D change log. Use when: CDC on SAP BDC data products, incremental capture from a catalog-linked database, medallion over a BDC share, Silver/Gold dynamic tables on SAP data, data is a day behind, streams or CHANGES refused on BDC tables, primary key or merge key of a BDC object, insert/update/delete change log from SAP data. Triggers: SAP BDC CDC, BDC medallion, catalog-linked database CDC, zero-copy CDC, __OPERATION_TYPE, __TIMESTAMP, ZZLASTCHGDATE, load_type, BDC Connect dynamic tables, incremental refresh SAP share, bronze silver gold SAP BDC, SHOW PRIMARY KEYS, declared key, primary key, RELY constraint, key drift, cdc_log, change log."
 ---
 
 # SAP BDC Medallion + CDC
@@ -67,14 +67,22 @@ python3 <SKILL_DIR>/scripts/profile_share.py --connection <conn> --role <capture
   --database <CLD> --target <TARGET_DB> --warehouse <WH> --out <work>/config.yaml --guess-keys
 ```
 
-Prints per object: rows, track, flow hash, **masked columns**, and indicator
-columns with their **types**. Writes a draft `config.yaml`
-(schema: `<SKILL_DIR>/config/example.yaml`). Then fill in:
+Prints per object: rows, track, flow hash, the **declared primary key**,
+**masked columns**, and indicator columns with their **types**. Writes a draft
+`config.yaml` (schema: `<SKILL_DIR>/config/example.yaml`). Then fill in:
 
-- `keys` — the full grain. Use SAP knowledge of the CDS entity (CSN key
-  fields); `--guess-keys` only proposes the shortest unique leading prefix.
+- `keys` — the full grain. Standard data products declare a primary key on
+  every object (`SHOW PRIMARY KEYS`); the draft copies it, in `key_sequence`
+  order, with `key_source: declared` and the constraint name in a comment. Keep
+  it. Only objects with **no** declared key (custom data products) need a key
+  from you: use SAP knowledge of the CDS entity (CSN key fields); `--guess-keys`
+  proposes the shortest unique leading prefix for those objects only
+  (`key_source: inferred`). To deliberately differ from a declared key, set
+  `key_override: true` and `key_override_reason`.
 - `class` — `MASTER`, `TRANSACTION` or `EMPTY` (Bronze view only).
 - `nullable_keys`, `flags` (type-checked), optional `referential_integrity`.
+- `cdc_log` — optional, global or per object: also generate the I/U/D change
+  log (`60_changes.sql`, see Step 5).
 
 One config per schema. Multiple flow hashes mean multiple products.
 
@@ -84,15 +92,22 @@ One config per schema. Multiple flow hashes mean multiple products.
 python3 <SKILL_DIR>/scripts/verify_grain.py <work>/config.yaml --connection <conn> --role <capture_role>
 ```
 
-Every populated object must report `PASS`.
+Every populated object must report `PASS`; the note says whether the key is
+the declared one or inferred. Declared keys are `RELY` — asserted by SAP, not
+enforced by Snowflake — which is why they are counted here too.
 
+- `DRIFT` — config keys differ from the declared primary key. Use the declared
+  key; only keep yours with `key_override: true` and a reason.
+- `VIOLATED` — the declared key itself is not unique (counts reported). Do not
+  build on it; raise it with SAP.
 - `FAIL` — key too short; it would silently discard rows. Add key parts.
 - `BLOCKED` — a key column is **masked** for this role; Silver would collapse
   to one row per masked value. Follow `references/masking-and-privileges.md`.
   Do not work around it by dropping the key.
 - `POPULATED` — an `EMPTY` object now has rows; change its class.
 
-**STOP**: Show the verdict table. Do not continue until all PASS.
+**STOP**: Show the verdict table. Do not continue until all PASS (the script
+exits non-zero on DRIFT, VIOLATED, FAIL or BLOCKED).
 
 ### Step 5: Render and review the SQL
 
@@ -100,7 +115,17 @@ Every populated object must report `PASS`.
 python3 <SKILL_DIR>/scripts/render_sql.py <work>/config.yaml --out <work>/generated
 ```
 
-Writes `10_control`, `20_bronze`, `30_silver`, `40_gold`, `50_ops`.
+Writes `10_control`, `20_bronze`, `30_silver`, `40_gold`, `50_ops`, and
+`60_changes` when any object has `cdc_log: true`.
+
+`60_changes` creates a `CHANGES` schema with a standard stream on each chosen
+Silver dynamic table, `CHANGES.CHANGE_LOG`, and `CHANGES.SP_DRAIN_CHANGES()`.
+The drain copies the streams into a temp table and writes the log in one
+committed transaction, pairing DELETE and INSERT rows on the key: different
+business-column hash = `U`, INSERT only = `I`, DELETE only = `D`, same hash =
+re-delivery (dropped). It never reads `METADATA$ISUPDATE` (always FALSE on this
+path). No task is created — scheduling the drain is the user's decision.
+Re-run `60_changes` after re-running `30_silver`.
 
 Gold is domain specific and is not generated. Either write a Jinja template
 (`gold.template`) or leave the stub. Follow `references/layer-rules.md`:
@@ -110,7 +135,8 @@ List Gold dynamic tables under `gold.dynamic_tables`.
 `examples/customer-master/gold.sql.j2` is a complete example.
 
 **STOP**: Present the files and ask for approval to deploy. They create a
-database, schemas, views, dynamic tables, procedures and two **suspended** tasks.
+database, schemas, views, dynamic tables, procedures and two **suspended** tasks
+(plus streams, the change log and the drain procedure if `cdc_log` is set).
 
 ### Step 6: Deploy as the capture role
 
@@ -128,7 +154,8 @@ Iceberg-table or connector grant is missing (`references/masking-and-privileges.
 Run as the capture role, in `<TARGET_DB>`:
 
 ```sql
-CALL CAPTURE_CONTROL.SP_VALIDATE_METADATA();   -- expect: All N object(s) validated
+CALL CAPTURE_CONTROL.SP_VALIDATE_METADATA();   -- expect: All N object(s) validated; records declared keys
+SELECT * FROM CAPTURE_CONTROL.VW_KEY_DRIFT;    -- expect: MATCH (NO_DECLARED_KEY on custom products)
 CALL CAPTURE_CONTROL.SP_CAPTURE_CYCLE();       -- first: refreshed N, Gold rebuilt
 CALL CAPTURE_CONTROL.SP_CAPTURE_CYCLE();       -- second: refreshed 0 (nothing moved)
 CALL CAPTURE_CONTROL.SP_RECONCILE();           -- expect: source and Silver agree
@@ -136,13 +163,16 @@ SELECT * FROM CAPTURE_CONTROL.VW_CAPTURE_HEALTH;
 SHOW DYNAMIC TABLES IN DATABASE <TARGET_DB>;   -- every refresh_mode = INCREMENTAL
 ```
 
-Report each result. Investigate any `UNUSABLE`, `DIFFERENCE`, `RELOADED` or a
+Report each result. Investigate any `UNUSABLE`, `DIFFERENCE`, `RELOADED`,
+`CONFIG_DRIFT`, `DECLARED_KEY_CHANGED` or a
 `FULL` refresh mode before handing over. `SNAPSHOT_ONLY` means the object holds
 only initial-load rows (often a re-publish); note it.
 
 ### Step 8: Operate
 
-**STOP**: Ask before resuming tasks — they start consuming credits.
+**STOP**: Ask before resuming tasks — they start consuming credits. The same
+applies to any task the user wants for `CHANGES.SP_DRAIN_CHANGES()`: create it
+SUSPENDED and resume only on approval.
 
 ```sql
 ALTER TASK <TARGET_DB>.CAPTURE_CONTROL.TSK_CAPTURE_CYCLE RESUME;    -- poll, default 15 min
@@ -156,6 +186,8 @@ Hand over `VW_CAPTURE_HEALTH` as the daily check, and these follow-ups:
 - New objects need the Iceberg-table grant again.
 - Masking can be added later: re-run `verify_grain.py --role <capture_role>`
   periodically.
+- `VW_KEY_DRIFT` showing `DECLARED_KEY_CHANGED` means SAP changed an object's
+  primary key: re-profile, re-verify, re-render.
 
 ## Rules that must not be relaxed
 
@@ -164,22 +196,28 @@ Hand over `VW_CAPTURE_HEALTH` as the daily check, and these follow-ups:
   comma decimal separator and an unguarded cast returns NULL silently.
 - `run_id` is a flow identifier, not a watermark.
 - State `REFRESH_MODE = INCREMENTAL`; no non-deterministic SQL in a dynamic table.
-- Keys are verified, never inferred. Check indicator types before `COALESCE`.
+- Use the declared primary key, verify it, infer only where none is declared.
+  `RELY` is not enforcement. Quote key columns: they are case-sensitive camel
+  case. Check indicator types before `COALESCE`.
+- Pair change-log events on the key and a business-column hash; never trust
+  `METADATA$ISUPDATE` on a Silver stream.
 - Deletes are unverified on both tracks: keep daily reconciliation on.
 - Capture fixes freshness, not missing fields: `references/gaps-and-asks.md`.
 
 ## Stopping points
 
 - Step 2: target, track and object scope confirmed
-- Step 4: all objects PASS grain verification as the capture role
+- Step 3: keys taken from the declared primary keys; any inferred or overridden key confirmed with the user
+- Step 4: all objects PASS grain verification as the capture role (no DRIFT / VIOLATED)
 - Step 5: generated SQL approved before any DDL runs
-- Step 8: explicit approval before resuming tasks
+- Step 8: explicit approval before resuming tasks, including any drain task for the change log
 
 ## Output
 
 A target database with `CAPTURE_CONTROL` (registry, validation, audit,
-reconciliation, procedures, views, suspended tasks), `BRONZE` zero-copy views,
-`SILVER` incremental dynamic tables and `GOLD` marts. Also the reviewed
+reconciliation, declared-key baseline and drift view, procedures, views,
+suspended tasks), `BRONZE` zero-copy views, `SILVER` incremental dynamic tables,
+`GOLD` marts and, with `cdc_log`, `CHANGES` (streams, change log, drain). Also the reviewed
 `config.yaml`, the generated SQL, a readiness report, and a verification summary.
 
 ## References

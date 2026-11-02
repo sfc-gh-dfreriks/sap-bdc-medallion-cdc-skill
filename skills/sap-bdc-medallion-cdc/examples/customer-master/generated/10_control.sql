@@ -35,10 +35,14 @@ CREATE SCHEMA IF NOT EXISTS SAP_CUSTOMER_360.GOLD
 /* ---------------------------------------------------------------------------
    The object registry. One row per source object.
 
-   MERGE_KEY_COLUMNS is the full grain. A catalog-linked table declares no
-   primary key, so every key below must have been VERIFIED (rows = distinct key
-   combinations) with scripts/verify_grain.py — never inferred from column
-   order. A short key does not error; it silently collapses rows.
+   MERGE_KEY_COLUMNS is the full grain. On standard data products it is the
+   primary key SAP declares on the catalog-linked table (KEY_SOURCE =
+   'declared'); the declaration is RELY — asserted by SAP, not enforced by
+   Snowflake — so it was still VERIFIED (rows = distinct key combinations)
+   with scripts/verify_grain.py. Custom data products declare none; their keys
+   are KEY_SOURCE = 'inferred' and verified the same way. A short key does not
+   error; it silently collapses rows. VW_KEY_DRIFT (below) watches the
+   declaration for change after deployment.
    --------------------------------------------------------------------------- */
 CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK (
   OBJECT_NAME         VARCHAR NOT NULL,
@@ -51,6 +55,8 @@ CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK (
   LOAD_TYPE_COLUMN    VARCHAR,            -- load_type_<flow hash> (standard only)
   RUN_ID_COLUMN       VARCHAR,            -- run_id_<flow hash> (standard only)
   MERGE_KEY_COLUMNS   VARCHAR NOT NULL,   -- verified full grain, comma separated
+  KEY_SOURCE          VARCHAR,            -- declared (SAP primary key) | inferred
+  KEY_OVERRIDE        BOOLEAN,            -- TRUE: config deliberately differs from the declared key
   TARGET_DT           VARCHAR,
   OBJECT_CLASS        VARCHAR,            -- MASTER | TRANSACTION | EMPTY
   LAST_WATERMARK_TEXT VARCHAR,            -- as seen on the share, unparsed
@@ -61,30 +67,44 @@ CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK (
   CONSTRAINT PK_WATERMARK PRIMARY KEY (OBJECT_NAME)
 );
 
+/* Upgrade path for registries created before key provenance was recorded. */
+ALTER TABLE SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK ADD COLUMN IF NOT EXISTS KEY_SOURCE VARCHAR;
+ALTER TABLE SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK ADD COLUMN IF NOT EXISTS KEY_OVERRIDE BOOLEAN;
+
 /* MERGE so re-running neither duplicates rows nor resets advanced watermarks. */
 MERGE INTO SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK t
 USING (
   SELECT * FROM VALUES
     ('CUSTOMER', 'CUSTOMER_V1."customer"."customer"', 'Customer', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERCOMPANYCODE', 'CUSTOMER_V1."customer"."customercompanycode"', 'Customer,CompanyCode', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERSALESAREA', 'CUSTOMER_V1."customer"."customersalesarea"', 'Customer,SalesOrganization,DistributionChannel,Division', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERSALESAREATAX', 'CUSTOMER_V1."customer"."customersalesareatax"', 'Customer,SalesOrganization,DistributionChannel,Division,DepartureCountry,CustomerTaxCategory', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERDUNNING', 'CUSTOMER_V1."customer"."customerdunning"', 'CompanyCode,Customer,DunningArea', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERUNLOADINGPOINT', 'CUSTOMER_V1."customer"."customerunloadingpoint"', 'Customer,UnloadingPointName', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")'),
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE),
     ('CUSTOMERWITHHOLDINGTAX', 'CUSTOMER_V1."customer"."customerwithholdingtax"', 'Customer,CompanyCode,WithholdingTaxType', 'MASTER',
-     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")')
-  AS v(OBJECT_NAME, SOURCE_FQN, MERGE_KEY_COLUMNS, OBJECT_CLASS, POLL_MAX_EXPR, POLL_MIN_EXPR)
+     'MAX("__TIMESTAMP")', 'MIN("__TIMESTAMP")',
+     'declared', FALSE)
+  AS v(OBJECT_NAME, SOURCE_FQN, MERGE_KEY_COLUMNS, OBJECT_CLASS, POLL_MAX_EXPR, POLL_MIN_EXPR,
+       KEY_SOURCE, KEY_OVERRIDE)
 ) s
 ON t.OBJECT_NAME = s.OBJECT_NAME
 WHEN MATCHED THEN UPDATE SET
   t.SOURCE_FQN        = s.SOURCE_FQN,
   t.MERGE_KEY_COLUMNS = s.MERGE_KEY_COLUMNS,
+  t.KEY_SOURCE        = s.KEY_SOURCE,
+  t.KEY_OVERRIDE      = s.KEY_OVERRIDE,
   t.OBJECT_CLASS      = s.OBJECT_CLASS,
   t.POLL_MAX_EXPR     = s.POLL_MAX_EXPR,
   t.POLL_MIN_EXPR     = s.POLL_MIN_EXPR,
@@ -93,15 +113,15 @@ WHEN MATCHED THEN UPDATE SET
   t.UPDATED_AT        = SYSDATE()
 WHEN NOT MATCHED THEN INSERT
   (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, POLL_MAX_EXPR, POLL_MIN_EXPR,
-   OPERATION_COLUMN, LOAD_TYPE_COLUMN, RUN_ID_COLUMN, MERGE_KEY_COLUMNS, TARGET_DT,
-   OBJECT_CLASS, LAST_RUN_STATUS, UPDATED_AT)
+   OPERATION_COLUMN, LOAD_TYPE_COLUMN, RUN_ID_COLUMN, MERGE_KEY_COLUMNS, KEY_SOURCE, KEY_OVERRIDE,
+   TARGET_DT, OBJECT_CLASS, LAST_RUN_STATUS, UPDATED_AT)
   VALUES
   (s.OBJECT_NAME, s.SOURCE_FQN, 'STANDARD', '__TIMESTAMP',
    s.POLL_MAX_EXPR, s.POLL_MIN_EXPR,
    '__OPERATION_TYPE',
    'load_type_8995a2862a8343bd8390aaa82c46e881',
    'run_id_8995a2862a8343bd8390aaa82c46e881',
-   s.MERGE_KEY_COLUMNS,
+   s.MERGE_KEY_COLUMNS, s.KEY_SOURCE, s.KEY_OVERRIDE,
    IFF(s.OBJECT_CLASS = 'EMPTY', NULL, 'SAP_CUSTOMER_360.SILVER.DT_' || s.OBJECT_NAME),
    s.OBJECT_CLASS, 'REGISTERED', SYSDATE());
 
@@ -154,11 +174,133 @@ CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.RECONCILIATION (
 
 /* Baseline of the initial load, captured once per object. Reload detection
    compares against it: if the minimum watermark moves forward, SAP re-published
-   the object instead of sending a delta. */
+   the object instead of sending a delta. The declared key is recorded the
+   first time SP_RECORD_DECLARED_KEYS sees the object, so a later change to
+   SAP's primary key is a reported difference rather than a silent one. */
 CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE (
-  OBJECT_NAME            VARCHAR,
-  FIRST_INITIAL_TS_TEXT  VARCHAR,
-  ROWS_AT_BASELINE       NUMBER,
-  CAPTURED_AT            TIMESTAMP_NTZ DEFAULT SYSDATE(),
+  OBJECT_NAME             VARCHAR,
+  FIRST_INITIAL_TS_TEXT   VARCHAR,
+  ROWS_AT_BASELINE        NUMBER,
+  CAPTURED_AT             TIMESTAMP_NTZ DEFAULT SYSDATE(),
+  DECLARED_KEY_COLUMNS    VARCHAR,          -- in key_sequence order; NULL = none declared
+  DECLARED_KEY_CONSTRAINT VARCHAR,          -- SYS_CONSTRAINT_<uuid>
+  DECLARED_KEY_RECORDED_AT TIMESTAMP_NTZ,   -- NULL = not yet recorded
   CONSTRAINT PK_OBJECT_BASELINE PRIMARY KEY (OBJECT_NAME)
 );
+ALTER TABLE SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE ADD COLUMN IF NOT EXISTS DECLARED_KEY_COLUMNS VARCHAR;
+ALTER TABLE SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE ADD COLUMN IF NOT EXISTS DECLARED_KEY_CONSTRAINT VARCHAR;
+ALTER TABLE SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE ADD COLUMN IF NOT EXISTS DECLARED_KEY_RECORDED_AT TIMESTAMP_NTZ;
+
+/* Every observation of the declared primary key, one row per object per check.
+   KEY_COLUMNS NULL means the share declared no key for the object at that time. */
+CREATE TABLE IF NOT EXISTS SAP_CUSTOMER_360.CAPTURE_CONTROL.DECLARED_KEY_SNAPSHOT (
+  CHECKED_AT      TIMESTAMP_NTZ,
+  OBJECT_NAME     VARCHAR,
+  SOURCE_TABLE    VARCHAR,
+  KEY_COLUMNS     VARCHAR,     -- comma separated, key_sequence order
+  CONSTRAINT_NAME VARCHAR,
+  RELY            BOOLEAN
+);
+
+
+/* ---------------------------------------------------------------------------
+   Declared-key recorder. Called by SP_VALIDATE_METADATA (50_ops). SHOW output
+   is read with RESULT_SCAN immediately after the SHOW, inside the procedure,
+   so no other statement can take LAST_QUERY_ID() in between.
+   --------------------------------------------------------------------------- */
+CREATE OR REPLACE PROCEDURE SAP_CUSTOMER_360.CAPTURE_CONTROL.SP_RECORD_DECLARED_KEYS()
+  RETURNS VARCHAR
+  LANGUAGE SQL
+  COMMENT = 'Snapshot the primary keys SAP declares on CUSTOMER_V1."customer" and seed the key baseline.'
+AS
+$$
+DECLARE
+  v_checked  TIMESTAMP_NTZ DEFAULT SYSDATE();
+  v_qid      VARCHAR;
+  n_declared NUMBER DEFAULT 0;
+BEGIN
+  SHOW PRIMARY KEYS IN SCHEMA CUSTOMER_V1."customer";
+  v_qid := LAST_QUERY_ID();
+
+  INSERT INTO SAP_CUSTOMER_360.CAPTURE_CONTROL.DECLARED_KEY_SNAPSHOT
+    (CHECKED_AT, OBJECT_NAME, SOURCE_TABLE, KEY_COLUMNS, CONSTRAINT_NAME, RELY)
+  WITH pk AS (
+      SELECT "table_name" AS TBL, "column_name" AS COL, "key_sequence" AS SEQ,
+             "constraint_name" AS CN, "rely" AS RELY
+      FROM TABLE(RESULT_SCAN(:v_qid))
+  ), reg AS (
+      SELECT * FROM VALUES
+        ('CUSTOMER', 'customer'),
+        ('CUSTOMERCOMPANYCODE', 'customercompanycode'),
+        ('CUSTOMERSALESAREA', 'customersalesarea'),
+        ('CUSTOMERSALESAREATAX', 'customersalesareatax'),
+        ('CUSTOMERDUNNING', 'customerdunning'),
+        ('CUSTOMERUNLOADINGPOINT', 'customerunloadingpoint'),
+        ('CUSTOMERWITHHOLDINGTAX', 'customerwithholdingtax')
+      AS r(OBJECT_NAME, SOURCE_TABLE)
+  )
+  SELECT :v_checked, reg.OBJECT_NAME, reg.SOURCE_TABLE,
+         LISTAGG(pk.COL, ',') WITHIN GROUP (ORDER BY pk.SEQ),
+         MAX(pk.CN),
+         BOOLOR_AGG(pk.RELY::BOOLEAN)
+  FROM reg LEFT JOIN pk ON pk.TBL = reg.SOURCE_TABLE
+  GROUP BY reg.OBJECT_NAME, reg.SOURCE_TABLE;
+
+  /* First sighting becomes the baseline; later sightings are compared to it. */
+  MERGE INTO SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE b
+  USING (SELECT * FROM SAP_CUSTOMER_360.CAPTURE_CONTROL.DECLARED_KEY_SNAPSHOT WHERE CHECKED_AT = :v_checked) s
+  ON b.OBJECT_NAME = s.OBJECT_NAME
+  WHEN MATCHED AND b.DECLARED_KEY_RECORDED_AT IS NULL THEN UPDATE SET
+    b.DECLARED_KEY_COLUMNS     = s.KEY_COLUMNS,
+    b.DECLARED_KEY_CONSTRAINT  = s.CONSTRAINT_NAME,
+    b.DECLARED_KEY_RECORDED_AT = s.CHECKED_AT;
+
+  n_declared := (SELECT COUNT(*) FROM SAP_CUSTOMER_360.CAPTURE_CONTROL.DECLARED_KEY_SNAPSHOT
+                 WHERE CHECKED_AT = :v_checked AND KEY_COLUMNS IS NOT NULL);
+  RETURN :n_declared || ' of 7 object(s) carry a declared primary key.';
+END;
+$$;
+
+
+/* ---------------------------------------------------------------------------
+   Key drift. One row per registered object, newest declared-key observation
+   against the baseline and against the config keys in the registry.
+     MATCH                 config keys = declared key (as a set)
+     OVERRIDDEN            config differs on purpose (key_override in config)
+     CONFIG_DRIFT          config differs from the declared key — re-run verify_grain.py
+     DECLARED_KEY_CHANGED  SAP changed the declared key since baseline — re-profile
+     CONSTRAINT_REPLACED   same columns, new constraint (typically a re-publish)
+     NO_DECLARED_KEY       nothing declared (custom product): inferred key, watched by reconciliation
+     NOT_CHECKED           SP_VALIDATE_METADATA has not run yet
+   --------------------------------------------------------------------------- */
+CREATE OR REPLACE VIEW SAP_CUSTOMER_360.CAPTURE_CONTROL.VW_KEY_DRIFT
+  COMMENT = 'Objects whose declared primary key changed since baseline or no longer matches the config keys.'
+AS
+WITH latest AS (
+    SELECT * FROM SAP_CUSTOMER_360.CAPTURE_CONTROL.DECLARED_KEY_SNAPSHOT
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY OBJECT_NAME ORDER BY CHECKED_AT DESC) = 1
+)
+SELECT w.OBJECT_NAME,
+       w.MERGE_KEY_COLUMNS        AS CONFIG_KEY_COLUMNS,
+       w.KEY_SOURCE,
+       w.KEY_OVERRIDE,
+       b.DECLARED_KEY_COLUMNS     AS BASELINE_KEY_COLUMNS,
+       b.DECLARED_KEY_CONSTRAINT  AS BASELINE_CONSTRAINT,
+       l.KEY_COLUMNS              AS DECLARED_KEY_COLUMNS,
+       l.CONSTRAINT_NAME          AS DECLARED_CONSTRAINT,
+       l.CHECKED_AT,
+       CASE
+         WHEN l.OBJECT_NAME IS NULL                                         THEN 'NOT_CHECKED'
+         WHEN b.DECLARED_KEY_RECORDED_AT IS NOT NULL
+              AND NOT EQUAL_NULL(b.DECLARED_KEY_COLUMNS, l.KEY_COLUMNS)     THEN 'DECLARED_KEY_CHANGED'
+         WHEN l.KEY_COLUMNS IS NULL                                         THEN 'NO_DECLARED_KEY'
+         WHEN ARRAY_TO_STRING(ARRAY_SORT(SPLIT(w.MERGE_KEY_COLUMNS, ',')), ',')
+              <> ARRAY_TO_STRING(ARRAY_SORT(SPLIT(l.KEY_COLUMNS, ',')), ',')
+              THEN IFF(COALESCE(w.KEY_OVERRIDE, FALSE), 'OVERRIDDEN', 'CONFIG_DRIFT')
+         WHEN b.DECLARED_KEY_RECORDED_AT IS NOT NULL
+              AND NOT EQUAL_NULL(b.DECLARED_KEY_CONSTRAINT, l.CONSTRAINT_NAME) THEN 'CONSTRAINT_REPLACED'
+         ELSE 'MATCH'
+       END AS VERDICT
+FROM      SAP_CUSTOMER_360.CAPTURE_CONTROL.WATERMARK w
+LEFT JOIN latest l ON l.OBJECT_NAME = w.OBJECT_NAME
+LEFT JOIN SAP_CUSTOMER_360.CAPTURE_CONTROL.OBJECT_BASELINE b ON b.OBJECT_NAME = w.OBJECT_NAME;

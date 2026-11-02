@@ -66,11 +66,17 @@ Dynamic tables handle physical deletes correctly by diffing consecutive source s
 
 The replication timestamp on the custom track is a customer extension field added to the SAP source during SLT pipeline configuration. Its name - `ZZLASTCHGDATE` on the reference tenant - is set per BDC pipeline implementation. It may differ between data products on the same tenant, or be absent on a BDC deployment that was not configured to include it. The readiness assessment discovers the column name; do not assume a name.
 
-### Grain not declared on catalog-linked tables
+### Grain declared, but not enforced (closed for standard products, 2026-11-02)
 
-**Severity: medium.**
+**Severity: low (standard track); medium (custom track).**
 
-Catalog-linked tables carry no primary key constraint. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history (EKBE) requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to hold duplicates, and de-duplicating on that key silently discards real goods movements without any error. Confirm the grain before writing any MERGE statement. This applies to both tracks.
+*Closed for standard data products.* Since 2026-10-30 catalog-linked databases publish a primary key per object: `SHOW PRIMARY KEYS IN DATABASE <CLD>` returns `column_name`, `key_sequence` and `constraint_name` (`SYS_CONSTRAINT_<uuid>`) with `rely = true`. On the reference account 54 of 55 objects across 8 of 9 shares carry one, and every `CUSTOMER_V1` declaration checked was unique - `customer` 3,450/3,450, `customerpartnerfunction` 56,663/56,663, `customersalesareatax` 43,085/43,085 on its six-part key, the object where an intuitive four-part key had collapsed 39,462 rows to 14,017. The skill now takes keys from the declaration.
+
+What remains:
+
+- **RELY is not enforcement.** Snowflake does not check the constraint, so `verify_grain.py` still counts rows against distinct keys (`VIOLATED` if the declaration is not unique), and `VW_KEY_DRIFT` watches for the declaration changing after deployment.
+- **Custom data products still declare nothing** (`SAP_REFRESHDB_SHARE_V1` on the reference account). There the grain must be established by hand - purchase order history (EKBE), for example, needs a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`, and a five-part key silently discards real goods movements.
+- Identifiers in the declaration are case-sensitive camel case and must be quoted.
 
 ### Uninitialised objects cannot be described
 
@@ -161,7 +167,7 @@ Without a column that distinguishes insert, update, and delete at row level, phy
 
 ### 6. Documented grain and primary key per object
 
-Catalog-linked tables carry no primary key constraint. For most objects, the business key is published in SAP documentation. For several it is not obvious. A machine-readable key specification in the data product metadata, or a supplementary reference document covering every object in each data product, would prevent silent merge key errors. This applies to both tracks.
+*Delivered for standard data products (declared `RELY` primary keys, first seen 2026-10-30).* Two parts remain open: declare keys on **custom** data products too, and state whether the declaration is guaranteed unique (it is not enforced on the Snowflake side) and stable across product versions, so a consumer knows when to re-verify.
 
 ### 7. Guidance on uninitialised objects
 

@@ -51,7 +51,7 @@ the workflow:
 | silent failure | what happens | gate |
 | --- | --- | --- |
 | a key column is **masked** for the role that owns Silver | every key reads `********`; Silver collapses to one row per masked value | `verify_grain.py --role` → `BLOCKED` |
-| a merge key is one part short | rows are silently discarded (39,462 → 14,017 on one object) | `verify_grain.py` → `FAIL` |
+| a merge key is one part short | rows are silently discarded (39,462 → 14,017 on one object) | prevented at source: keys come from SAP's declared primary key; still gated by `verify_grain.py` → `DRIFT` / `VIOLATED` / `FAIL`, and `VW_KEY_DRIFT` after deploy |
 | reading a **copy** of a share | connector metadata corrupted on every copy tested | profile warns; templates require a flow hash |
 | `__TIMESTAMP` cast without fixing its comma decimal | every value parses to NULL | handled in Bronze |
 | `REFRESH_MODE = AUTO` | silent fallback to FULL; bigger bill, longer lag | always `INCREMENTAL` |
@@ -65,12 +65,14 @@ the workflow:
 ```
 <TARGET_DB>
   CAPTURE_CONTROL   WATERMARK registry · METADATA_VALIDATION · REFRESH_AUDIT · RECONCILIATION · OBJECT_BASELINE
+                    DECLARED_KEY_SNAPSHOT · SP_RECORD_DECLARED_KEYS
                     SP_VALIDATE_METADATA · SP_POLL_OBJECT · SP_CAPTURE_CYCLE · SP_RECONCILE · SP_DAILY_ASSURANCE
-                    VW_CAPTURE_HEALTH · VW_FRESHNESS · VW_RELOAD_DETECTION · VW_REFERENTIAL_INTEGRITY · VW_REFRESH_HISTORY
+                    VW_CAPTURE_HEALTH · VW_FRESHNESS · VW_KEY_DRIFT · VW_RELOAD_DETECTION · VW_REFERENTIAL_INTEGRITY · VW_REFRESH_HISTORY
                     TSK_CAPTURE_CYCLE (suspended) · TSK_DAILY_ASSURANCE (suspended)
   BRONZE            V_<object> zero-copy views · VW_SHARE_INVENTORY
   SILVER            DT_<object> dynamic tables, REFRESH_MODE = INCREMENTAL, de-duplicated on the verified grain
   GOLD              your marts (worked example: DIM_CUSTOMER_360, BRG_CUSTOMER_SALES_AREA)
+  CHANGES           only with cdc_log: STR_<object> streams on Silver · CHANGE_LOG (I/U/D) · SP_DRAIN_CHANGES
 ```
 
 The poll reads `MAX()` of the replication watermark **as text**, which Iceberg
@@ -83,9 +85,10 @@ costs almost nothing. Dynamic tables refresh only when the watermark moved.
 skills/sap-bdc-medallion-cdc/
   SKILL.md                     the workflow Cortex Code follows, with approval stops
   scripts/
-    profile_share.py           discover CLDs, profile one, draft config.yaml
-    verify_grain.py            rows vs distinct keys, masking check, as a given role
-    render_sql.py              config.yaml -> 10_control … 50_ops.sql (no connection needed)
+    profile_share.py           discover CLDs, profile one, draft config.yaml with declared keys
+    verify_grain.py            rows vs distinct keys, declared-key drift, masking check, as a given role
+    render_sql.py              config.yaml -> 10_control … 50_ops.sql, 60_changes.sql if cdc_log (no connection needed)
+    declared_keys.py           SHOW PRIMARY KEYS reader shared by the two above
     run_sql.py                 deploy files in order; handles $$ procedure bodies
     readiness/                 CDC readiness probe (from sap-bdc-cdc)
   templates/                   Jinja templates for the generated SQL
@@ -103,11 +106,16 @@ Everything is plain Python and SQL:
 cd skills/sap-bdc-medallion-cdc
 pip install -r requirements.txt
 python3 scripts/profile_share.py --connection <conn> --database <CLD> --out work/config.yaml --guess-keys
-# edit work/config.yaml: keys, classes, flags
+# keys come from SAP's declared primary keys (key_source: declared); --guess-keys
+# only fills objects with none (custom products). Edit classes, flags, cdc_log.
 python3 scripts/verify_grain.py work/config.yaml --connection <conn> --role <capture_role>
 python3 scripts/render_sql.py work/config.yaml --out work/generated
 python3 scripts/run_sql.py --connection <conn> --role <capture_role> --warehouse <wh> --dir work/generated
 ```
+
+Workflow: discover → readiness → profile (declared keys) → verify grain
+(`PASS` / `DRIFT` / `VIOLATED` / `FAIL` / `BLOCKED` / `POPULATED`) → render →
+deploy → prove → operate, optionally draining the I/U/D change log.
 
 ## Related
 

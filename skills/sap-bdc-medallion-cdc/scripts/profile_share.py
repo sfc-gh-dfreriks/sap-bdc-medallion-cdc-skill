@@ -6,12 +6,17 @@
         --target SAP_CUSTOMER_360 --warehouse COMPUTE_WH --out config.yaml [--guess-keys]
 
 Read-only. For each object it records row count, column types, the CDC track
-(STANDARD / CUSTOM / NONE), the flow hash, and the indicator-style columns
-whose TYPE you must check before writing a flag (TEXT vs BOOLEAN). It writes a
-draft config.yaml with `keys` left for you to fill and verify - a
-catalog-linked table declares no primary key, so keys are never inferred
-silently. --guess-keys proposes the shortest leading-column prefix that is
-unique; treat it as a suggestion and confirm with verify_grain.py.
+(STANDARD / CUSTOM / NONE), the flow hash, the declared primary key, and the
+indicator-style columns whose TYPE you must check before writing a flag (TEXT
+vs BOOLEAN).
+
+Keys: SAP BDC standard data products publish a primary key on every object
+(SHOW PRIMARY KEYS, RELY = asserted by SAP, not enforced by Snowflake). The
+draft writes it as `keys:` with `key_source: declared` and the constraint name
+in a comment. Objects with no declared key (custom data products) get
+`keys: []` to fill in; --guess-keys proposes the shortest unique leading-column
+prefix for those objects only, written with `key_source: inferred`. Either way,
+confirm with verify_grain.py before rendering.
 """
 from __future__ import annotations
 
@@ -21,6 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "readiness"))
 from conn import Session, fqn  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from declared_keys import declared_keys  # noqa: E402
 from masking import masked_columns  # noqa: E402
 from discover import (catalog_linked_databases, describe, find_standard_signal,  # noqa: E402
                       find_watermark, objects_in, track_of)
@@ -62,7 +69,8 @@ def main() -> None:
     ap.add_argument("--out", help="write a draft config.yaml here")
     ap.add_argument("--role", help="USE ROLE first (use the role capture will run as)")
     ap.add_argument("--guess-keys", action="store_true",
-                    help="propose a unique leading-column prefix per object (runs COUNT DISTINCT queries)")
+                    help="for objects with NO declared primary key only: propose a unique leading-column "
+                         "prefix (runs COUNT DISTINCT queries)")
     a = ap.parse_args()
     s = Session(a.connection)
     if a.role:
@@ -80,6 +88,7 @@ def main() -> None:
 
     objs = [describe(s, o) for o in objects_in(s, a.database)]
     schemas = sorted({o.schema for o in objs})
+    pks = declared_keys(s, a.database)
     tracks, hashes, lines, cfg_objs = set(), set(), [], []
     print(f"\n{a.database}: {len(objs)} object(s) in schema(s) {', '.join(schemas)}\n")
     for o in objs:
@@ -94,7 +103,12 @@ def main() -> None:
             hashes.add(sig.flow_hash)
         wm = None if sig else find_watermark(o)
         inds = indicator_columns(o)
-        keys = guess_keys(s, o, rows) if a.guess_keys and rows else None
+        pk = pks.get((o.schema, o.name))
+        if pk:
+            keys, key_source = pk["columns"], "declared"
+        else:
+            keys = guess_keys(s, o, rows) if a.guess_keys and rows else None
+            key_source = "inferred" if keys else None
         print(f"  {o.name:<34} rows={rows:<10,} track={tr:<8} "
               f"{'hash=' + sig.flow_hash[:8] + '…' if sig and sig.flow_hash else ''}"
               f"{'watermark=' + wm.name if wm else ''}")
@@ -105,22 +119,33 @@ def main() -> None:
         if inds:
             print("      indicator columns (check type before COALESCE): "
                   + ", ".join(f"{n}:{t}" for n, t in inds))
-        if keys:
-            print(f"      candidate key (verify!): {', '.join(keys)}")
+        if pk:
+            print(f"      declared key ({pk['constraint']}{', RELY' if pk['rely'] else ''}): {', '.join(keys)}")
+        elif keys:
+            print(f"      NO declared key - inferred candidate (verify!): {', '.join(keys)}")
+        else:
+            print("      NO declared key - fill `keys` by hand (or use --guess-keys)")
         cfg_objs.append({"name": o.name.upper(), "table": o.name, "rows": rows,
-                         "keys": keys, "cls": "EMPTY" if rows == 0 else "MASTER", "wm": wm.name if wm else None})
+                         "keys": keys, "key_source": key_source, "constraint": pk["constraint"] if pk else None,
+                         "cls": "EMPTY" if rows == 0 else "MASTER", "wm": wm.name if wm else None})
 
     print()
     if len(schemas) > 1:
         print("NOTE: more than one schema - generate one config per schema.")
     if len(hashes) > 1:
         print(f"NOTE: {len(hashes)} different flow hashes - objects come from different products/flows.")
+    undeclared = [o["name"] for o in cfg_objs if o["key_source"] != "declared"]
+    if undeclared:
+        print(f"NOTE: {len(undeclared)} object(s) have no declared primary key "
+              f"(custom data product?): {', '.join(undeclared)}")
     if "NONE" in tracks:
         print("NOTE: some objects carry no change signal; they can only be captured by full-refresh comparison.")
 
     if a.out:
         track = "STANDARD" if "STANDARD" in tracks else "CUSTOM"
-        y = ["# DRAFT generated by profile_share.py - fill/verify every `keys` with verify_grain.py,",
+        y = ["# DRAFT generated by profile_share.py. `key_source: declared` keys come from SAP's",
+             "# published primary key (RELY, not enforced); `inferred` keys were guessed. Verify all",
+             "# of them with verify_grain.py; fill any `keys: []` by hand,",
              "# set class (MASTER | TRANSACTION | EMPTY), add Silver flags after checking column types.",
              f"target_database: {a.target}", f"warehouse: {a.warehouse}", "", "source:",
              f"  database: {a.database}", f"  schema: {schemas[0] if schemas else ''}", f"  track: {track}"]
@@ -132,7 +157,10 @@ def main() -> None:
         y += ["", "objects:"]
         for o in cfg_objs:
             y += [f"  - name: {o['name']}", f"    table: {o['table']}",
-                  f"    keys: [{', '.join(o['keys'])}]" if o["keys"] else "    keys: []   # TODO verify grain",
+                  f"    keys: [{', '.join(o['keys'])}]" if o["keys"] else "    keys: []   # TODO no declared key - verify grain",
+                  *([f"    key_source: {o['key_source']}"
+                     + (f"   # {o['constraint']}" if o["constraint"] else "   # no declared key - guessed")]
+                    if o["key_source"] else []),
                   f"    class: {o['cls']}", f"    # rows at profile: {o['rows']:,}"]
         y += ["", "gold:", "  dynamic_tables: []   # list Gold DTs once written (see references/gold-patterns.md)"]
         Path(a.out).write_text("\n".join(y) + "\n")

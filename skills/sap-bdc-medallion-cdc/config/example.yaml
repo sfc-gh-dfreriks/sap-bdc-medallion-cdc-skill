@@ -2,6 +2,8 @@
 # One file per catalog-linked database schema. Draft one with
 #   scripts/profile_share.py --database <CLD> --out config.yaml
 # then complete and verify it (scripts/verify_grain.py) before rendering.
+# Standard data products declare a primary key per object; the draft copies it
+# into `keys` with `key_source: declared`. Custom products declare none.
 
 target_database: SAP_MATERIAL_360        # created if absent; holds CAPTURE_CONTROL, BRONZE, SILVER, GOLD
 warehouse: COMPUTE_WH                    # used by dynamic tables and tasks
@@ -18,6 +20,10 @@ source:
   # CUSTOM track only: the replication timestamp the pipeline owner exposed.
   # watermark_column: ZZLASTCHGDATE
 
+# Optional: emit 60_changes.sql - a stream per Silver dynamic table and an
+# I/U/D CHANGES.CHANGE_LOG paired on the key. Global default; override per object.
+cdc_log: false
+
 schedule:
   capture: 15 MINUTE                     # TSK_CAPTURE_CYCLE; the poll is free, so set by business need
   assurance: USING CRON 0 6 * * * UTC    # TSK_DAILY_ASSURANCE: validate + reconcile
@@ -25,7 +31,11 @@ schedule:
 objects:
   - name: PRODUCT                        # upper-case object name; Silver becomes SILVER.DT_PRODUCT
     table: product                       # table name on the share, as shown by SHOW TABLES
-    keys: [Product]                      # VERIFIED full grain (verify_grain.py must PASS)
+    keys: [Product]                      # full grain: the declared primary key (verify_grain.py must PASS)
+    key_source: declared                 # declared (SHOW PRIMARY KEYS) | inferred (no key declared)
+    # key_override: true                 # only to deliberately differ from the declared key ...
+    # key_override_reason: <why>         # ... and then a reason is required; otherwise verify_grain = DRIFT
+    # cdc_log: true                      # per-object override of the global cdc_log
     class: MASTER                        # MASTER | TRANSACTION | EMPTY
     # target_lag: 24 hours               # default: MASTER 24 hours, TRANSACTION 1 hour (a backstop)
     # comment: Product master
@@ -39,17 +49,20 @@ objects:
   - name: PRODUCTPLANT
     table: productplant
     keys: [Product, Plant]
+    key_source: declared
     class: MASTER
 
   - name: PRODUCTSTORAGELOCATION
     table: productstoragelocation
     keys: [Product, Plant, StorageLocation]
+    key_source: declared
     nullable_keys: [StorageLocation]     # COALESCEd to '~' so a NULL does not form its own partition
     class: MASTER
 
   - name: PRODUCTSALESTAX
     table: productsalestax
     keys: [Product, Country, TaxCategory]
+    key_source: declared
     class: EMPTY                         # Bronze view only - no dynamic table, not polled
 
 # Optional: report child rows whose key is missing from the master.

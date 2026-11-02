@@ -168,6 +168,10 @@ Focus the request conversation on items 2 and 3. Item 2 is already in the data a
 
 ---
 
+## Keys: none declared
+
+Standard data products declare a primary key on every object (`SHOW PRIMARY KEYS`); custom data products do not - on the reference account `SAP_REFRESHDB_SHARE_V1` was the only share of nine with no declared key. On this track the key is still yours to establish: take it from the CDS entity's key fields, use `profile_share.py --guess-keys` only as a suggestion (it writes `key_source: inferred`), and confirm with `verify_grain.py`. `VW_KEY_DRIFT` reports these objects as `NO_DECLARED_KEY`; if SAP later starts declaring keys it will show the declaration against your config. Ask the pipeline owner to publish the key (gaps-and-asks.md, ask 6).
+
 ## Registering for the watermark exception path
 
 Where a dynamic table cannot serve (non-deterministic transformation, or target outside Snowflake), register custom-track objects in the `WATERMARK` control table with `TRACK = 'CUSTOM'`:

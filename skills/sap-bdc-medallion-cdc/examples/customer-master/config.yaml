@@ -1,8 +1,10 @@
 # Worked example: the SAP BDC standard data product CUSTOMER_V1 (customer master).
 #
-# Every key below was verified on a live share with verify_grain.py
+# Every key below is the primary key SAP declares on the catalog-linked table
+# (SHOW PRIMARY KEYS IN DATABASE CUSTOMER_V1, RELY - asserted, not enforced),
+# drafted by profile_share.py and verified on a live share with verify_grain.py
 # (rows = distinct key combinations). Row counts are from the reference tenant
-# and will differ on yours; re-verify before deploying.
+# on 2026-11-02 and will differ on yours; re-verify before deploying.
 
 target_database: SAP_CUSTOMER_360
 warehouse: COMPUTE_WH
@@ -15,6 +17,9 @@ source:
   track: STANDARD                  # STANDARD = __OPERATION_TYPE/__TIMESTAMP present
   flow_hash: 8995a2862a8343bd8390aaa82c46e881   # suffix of load_type_<hash>; names the product
 
+# Change log (60_changes.sql): off by default, switched on per object below.
+cdc_log: false
+
 schedule:
   capture: 15 MINUTE
   assurance: USING CRON 0 6 * * * UTC
@@ -23,8 +28,10 @@ objects:
   - name: CUSTOMER
     table: customer
     keys: [Customer]
+    key_source: declared   # SYS_CONSTRAINT_42972e1e-cda6-40d1-b199-a38b4e0d9cb2
     class: MASTER
-    verified: 3,355 rows / 3,355 keys
+    verified: 3,450 rows / 3,450 keys
+    cdc_log: true                  # I/U/D events in CHANGES.CHANGE_LOG
     comment: Customer master, de-duplicated on Customer
     flags:
       # Mixed types in ONE table: DeletionIndicator / PostingIsBlocked /
@@ -46,8 +53,9 @@ objects:
   - name: CUSTOMERCOMPANYCODE
     table: customercompanycode
     keys: [Customer, CompanyCode]
+    key_source: declared   # SYS_CONSTRAINT_b70523bc-f9c3-4ca8-b9b8-bfd90cb09571
     class: MASTER
-    verified: 10,549 rows / 10,549 keys
+    verified: 10,615 rows / 10,615 keys
     flags:
       - name: IS_FLAGGED_DELETED
         expr: COALESCE("DeletionIndicator", FALSE)
@@ -61,8 +69,9 @@ objects:
   - name: CUSTOMERSALESAREA
     table: customersalesarea
     keys: [Customer, SalesOrganization, DistributionChannel, Division]
+    key_source: declared   # SYS_CONSTRAINT_a83fb266-e29b-4f41-8f84-422e13de7af8
     class: MASTER
-    verified: 14,097 rows / 14,097 keys
+    verified: 14,175 rows / 14,175 keys
     flags:
       - name: IS_FLAGGED_DELETED
         expr: COALESCE("DeletionIndicator", FALSE)
@@ -74,19 +83,24 @@ objects:
           OR COALESCE("SalesBlockForCustomer", '') <> '', TRUE, FALSE)
 
   # The grain that proves the point: the intuitive four-part sales-area key
-  # collapses 39,462 rows to 14,017 (64% silently lost). It needs six parts.
+  # collapsed 39,462 rows to 14,017 (64% silently lost) before SAP declared
+  # keys. The declared key has six parts; verify_grain.py reports DRIFT if the
+  # config is shortened (on 2026-11-02 it would discard 28,997 of 43,085 rows).
   - name: CUSTOMERSALESAREATAX
     table: customersalesareatax
     keys: [Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory]
+    key_source: declared   # SYS_CONSTRAINT_499e2682-4982-421e-a567-d97d3cf37d21
     nullable_keys: [DepartureCountry, CustomerTaxCategory]
     class: MASTER
-    verified: 39,462 rows / 39,462 keys (six-part key)
+    verified: 43,085 rows / 43,085 keys (six-part declared key)
+    cdc_log: true
 
   - name: CUSTOMERDUNNING
     table: customerdunning
     keys: [CompanyCode, Customer, DunningArea]
+    key_source: declared   # SYS_CONSTRAINT_932bcb77-3e6d-45d6-852f-7e7aebfab82f
     class: MASTER
-    verified: 17 rows / 17 keys
+    verified: 30 rows / 30 keys
     flags:
       - name: IS_DUNNING_BLOCKED
         expr: IFF(COALESCE("DunningBlock", '') <> '', TRUE, FALSE)
@@ -99,10 +113,12 @@ objects:
   - name: CUSTOMERUNLOADINGPOINT
     table: customerunloadingpoint
     keys: [Customer, UnloadingPointName]
+    key_source: declared   # SYS_CONSTRAINT_94c2f82f-07a0-4a71-ac52-025ce91cf2a4
     class: MASTER
   - name: CUSTOMERWITHHOLDINGTAX
     table: customerwithholdingtax
     keys: [Customer, CompanyCode, WithholdingTaxType]
+    key_source: declared   # SYS_CONSTRAINT_04610f08-16e9-4eef-bbe5-7063b6b885c7
     class: MASTER
 
 referential_integrity:

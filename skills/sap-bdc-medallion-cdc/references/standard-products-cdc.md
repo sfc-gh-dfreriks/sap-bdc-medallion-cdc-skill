@@ -133,7 +133,7 @@ WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
 
 `WATERMARK_COLUMN` must be `'__TIMESTAMP'` - the fixed-name column, two leading underscores. `LAST_WATERMARK_TEXT` is the comparison column for this track; it stores the raw text value and is never parsed during comparison. `OPERATION_COLUMN` must be `'__OPERATION_TYPE'`.
 
-`MERGE_KEY_COLUMNS` is required and has no default. A wrong grain silently produces duplicate rows or discards real records without any constraint violation. Confirm the business key against SAP data product documentation before inserting.
+`MERGE_KEY_COLUMNS` is required and has no default. A wrong grain silently produces duplicate rows or discards real records without any constraint violation. Since 2026-10-30 standard data products declare a primary key on every object: `SHOW PRIMARY KEYS IN DATABASE <CLD>` returns one row per key column (`key_sequence`, `constraint_name` = `SYS_CONSTRAINT_<uuid>`, `rely` = `true`). Use it - column names are case-sensitive camel case, so quote them - but verify it: `RELY` is SAP's assertion and Snowflake does not enforce it. On the reference tenant all 11 `CUSTOMER_V1` declarations were unique, including the six-part `customersalesareatax` key (43,085 rows / 43,085 keys) where an intuitive four-part key had collapsed 39,462 rows to 14,017. `verify_grain.py` reports `DRIFT` when the config differs from the declaration and `VIOLATED` if the declaration is not unique; `CAPTURE_CONTROL.VW_KEY_DRIFT` keeps watching after deployment.
 
 **Success criterion:** `SELECT * FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK WHERE TRACK = 'STANDARD'` returns one row per registered object.
 

@@ -39,6 +39,8 @@ AS
 $$
 DECLARE
   n_bad     NUMBER DEFAULT 0;
+  n_drift   NUMBER DEFAULT 0;
+  v_keys    VARCHAR;
   v_started TIMESTAMP_NTZ DEFAULT SYSDATE();
 BEGIN
 {%- for o in objects %}
@@ -87,13 +89,22 @@ BEGIN
   HAVING COUNT(*) > 0;
 {%- endfor %}
 
+  /* Record the declared primary keys (first sighting seeds the baseline). */
+  CALL CAPTURE_CONTROL.SP_RECORD_DECLARED_KEYS() INTO :v_keys;
+  n_drift := (SELECT COUNT(*) FROM CAPTURE_CONTROL.VW_KEY_DRIFT
+              WHERE VERDICT IN ('CONFIG_DRIFT', 'DECLARED_KEY_CHANGED'));
+
   n_bad := (SELECT COUNT(*) FROM CAPTURE_CONTROL.METADATA_VALIDATION
             WHERE CHECKED_AT >= :v_started AND VERDICT = 'UNUSABLE');
   IF (:n_bad > 0) THEN
     RETURN 'UNUSABLE METADATA on ' || :n_bad || ' of {{ objects | length }} object(s). '
            || 'Inspect CAPTURE_CONTROL.METADATA_VALIDATION and do not build capture on the failing objects.';
   END IF;
-  RETURN 'All {{ objects | length }} object(s) validated.';
+  IF (:n_drift > 0) THEN
+    RETURN 'KEY DRIFT on ' || :n_drift || ' object(s): the declared primary key no longer matches '
+           || 'the baseline or the config. Inspect CAPTURE_CONTROL.VW_KEY_DRIFT and re-run verify_grain.py.';
+  END IF;
+  RETURN 'All {{ objects | length }} object(s) validated. ' || :v_keys;
 END;
 $$;
 
@@ -325,17 +336,19 @@ WHERE  DATABASE_NAME = '{{ T_plain }}';
 
 /* The one object to look at each morning. */
 CREATE OR REPLACE VIEW CAPTURE_CONTROL.VW_CAPTURE_HEALTH
-  COMMENT = 'One row per object: freshness, last validation verdict, reload state and reconciliation.'
+  COMMENT = 'One row per object: freshness, last validation verdict, key drift, reload state and reconciliation.'
 AS
 SELECT f.OBJECT_NAME, f.OBJECT_CLASS, f.MINUTES_BEHIND, f.LAST_RUN_STATUS,
        v.VERDICT   AS METADATA_VERDICT, v.OPERATION_CARD, v.OPERATION_MAX_LEN, v.HASH_SUFFIX_SEEN,
        r.VERDICT   AS RELOAD_VERDICT,
+       k.VERDICT   AS KEY_VERDICT,
        rc.SOURCE_ROWS, rc.SILVER_ROWS, rc.DIFFERENCE AS ROW_DIFFERENCE, rc.VERDICT AS RECONCILE_VERDICT
 FROM       CAPTURE_CONTROL.VW_FRESHNESS f
 LEFT JOIN (SELECT * FROM CAPTURE_CONTROL.METADATA_VALIDATION
            QUALIFY ROW_NUMBER() OVER (PARTITION BY OBJECT_NAME ORDER BY CHECKED_AT DESC) = 1) v
        ON v.OBJECT_NAME = f.OBJECT_NAME
 LEFT JOIN CAPTURE_CONTROL.VW_RELOAD_DETECTION r ON r.OBJECT_NAME = f.OBJECT_NAME
+LEFT JOIN CAPTURE_CONTROL.VW_KEY_DRIFT        k ON k.OBJECT_NAME = f.OBJECT_NAME
 LEFT JOIN (SELECT * FROM CAPTURE_CONTROL.RECONCILIATION
            QUALIFY ROW_NUMBER() OVER (PARTITION BY OBJECT_NAME ORDER BY CHECKED_AT DESC) = 1) rc
        ON rc.OBJECT_NAME = f.OBJECT_NAME;

@@ -5,7 +5,7 @@ track. Seven objects in schema `customer`.
 
 | file | what it is |
 | --- | --- |
-| `config.yaml` | the reviewed share config: verified keys, classes, type-checked flags |
+| `config.yaml` | the reviewed share config: declared (and verified) keys, classes, type-checked flags, `cdc_log` on two objects |
 | `gold.sql.j2` | hand-written Gold: `DIM_CUSTOMER_360`, `BRG_CUSTOMER_SALES_AREA`, `VW_CUSTOMER_RISK` |
 | `generated/` | what `render_sql.py config.yaml` produces — committed so you can read it without running anything |
 | `readiness_report.md` | sample `cdc_readiness.py` output from a standard-track reference tenant |
@@ -15,6 +15,22 @@ Regenerate:
 ```bash
 python3 ../../scripts/render_sql.py config.yaml
 ```
+
+## Declared keys (2026-11-02)
+
+`CUSTOMER_V1` now declares a primary key on all 11 objects (`SHOW PRIMARY KEYS
+IN DATABASE CUSTOMER_V1`, `rely = true`). `profile_share.py` drafted every key
+in this config from those declarations (`key_source: declared`), and
+`verify_grain.py` returned PASS on all of them: `customer` 3,450 / 3,450,
+`customersalesareatax` 43,085 / 43,085 on its six-part key. A copy of the config
+with `customersalesareatax` cut to the four-part sales-area key returned
+`DRIFT` (it would discard 28,997 rows) and exit code 1. This config covers 7 of
+the 11 objects; the other four (`customerbusinesspartner`,
+`customercontactbusinesspartner`, `customercontactperson`,
+`customerpartnerfunction`) can be added from a fresh `profile_share.py` draft.
+
+`CUSTOMER` and `CUSTOMERSALESAREATAX` set `cdc_log: true`, so `generated/`
+includes `60_changes.sql`. Its statements compile; it has not been deployed.
 
 ## Test results (2026-10-02)
 
