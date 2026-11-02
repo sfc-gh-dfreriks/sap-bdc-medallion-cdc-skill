@@ -22,8 +22,10 @@
    move on every re-delivery.
 
    Re-running 30_silver (CREATE OR REPLACE DYNAMIC TABLE) invalidates these
-   streams. Re-run this file afterwards; it recreates only missing streams, so
-   it never silently resets a healthy stream's offset.
+   streams: they still exist but can no longer be read, so IF NOT EXISTS would
+   skip them. Re-run this file afterwards; each stream is probed with a
+   zero-row read (which does not move the offset) and recreated only if that
+   read fails, so a healthy stream's offset is never silently reset.
 
    Scheduling is left to you: no task is created. To drain on a schedule,
    create a task that CALLs CHANGES.SP_DRAIN_CHANGES(), create it SUSPENDED,
@@ -50,9 +52,18 @@ CREATE TABLE IF NOT EXISTS CHANGES.CHANGE_LOG (
   COMMENT = 'Insert / update / delete events derived from Silver streams on the declared primary key.';
 {% for o in cdc_objects %}
 /* --- {{ o.name }}: key {{ o.key_cols | join(", ") }} ({{ o.key_source }}) --- */
-CREATE STREAM IF NOT EXISTS CHANGES.STR_{{ o.name }}
-  ON DYNAMIC TABLE SILVER.DT_{{ o.name }}
-  COMMENT = 'Standard stream on SILVER.DT_{{ o.name }}; drained only by CHANGES.SP_DRAIN_CHANGES.';
+EXECUTE IMMEDIATE $$
+BEGIN
+  SELECT 1 FROM CHANGES.STR_{{ o.name }} LIMIT 0;   -- fails if missing, stale or its DT was replaced
+  RETURN 'STR_{{ o.name }} healthy, kept';
+EXCEPTION
+  WHEN OTHER THEN
+    CREATE OR REPLACE STREAM CHANGES.STR_{{ o.name }}
+      ON DYNAMIC TABLE SILVER.DT_{{ o.name }}
+      COMMENT = 'Standard stream on SILVER.DT_{{ o.name }}; drained only by CHANGES.SP_DRAIN_CHANGES.';
+    RETURN 'STR_{{ o.name }} (re)created';
+END;
+$$;
 {% endfor %}
 
 /* ---------------------------------------------------------------------------

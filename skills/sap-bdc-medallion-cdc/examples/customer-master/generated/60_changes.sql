@@ -22,8 +22,10 @@
    move on every re-delivery.
 
    Re-running 30_silver (CREATE OR REPLACE DYNAMIC TABLE) invalidates these
-   streams. Re-run this file afterwards; it recreates only missing streams, so
-   it never silently resets a healthy stream's offset.
+   streams: they still exist but can no longer be read, so IF NOT EXISTS would
+   skip them. Re-run this file afterwards; each stream is probed with a
+   zero-row read (which does not move the offset) and recreated only if that
+   read fails, so a healthy stream's offset is never silently reset.
 
    Scheduling is left to you: no task is created. To drain on a schedule,
    create a task that CALLs CHANGES.SP_DRAIN_CHANGES(), create it SUSPENDED,
@@ -50,14 +52,32 @@ CREATE TABLE IF NOT EXISTS CHANGES.CHANGE_LOG (
   COMMENT = 'Insert / update / delete events derived from Silver streams on the declared primary key.';
 
 /* --- CUSTOMER: key Customer (declared) --- */
-CREATE STREAM IF NOT EXISTS CHANGES.STR_CUSTOMER
-  ON DYNAMIC TABLE SILVER.DT_CUSTOMER
-  COMMENT = 'Standard stream on SILVER.DT_CUSTOMER; drained only by CHANGES.SP_DRAIN_CHANGES.';
+EXECUTE IMMEDIATE $$
+BEGIN
+  SELECT 1 FROM CHANGES.STR_CUSTOMER LIMIT 0;   -- fails if missing, stale or its DT was replaced
+  RETURN 'STR_CUSTOMER healthy, kept';
+EXCEPTION
+  WHEN OTHER THEN
+    CREATE OR REPLACE STREAM CHANGES.STR_CUSTOMER
+      ON DYNAMIC TABLE SILVER.DT_CUSTOMER
+      COMMENT = 'Standard stream on SILVER.DT_CUSTOMER; drained only by CHANGES.SP_DRAIN_CHANGES.';
+    RETURN 'STR_CUSTOMER (re)created';
+END;
+$$;
 
 /* --- CUSTOMERSALESAREATAX: key Customer, SalesOrganization, DistributionChannel, Division, DepartureCountry, CustomerTaxCategory (declared) --- */
-CREATE STREAM IF NOT EXISTS CHANGES.STR_CUSTOMERSALESAREATAX
-  ON DYNAMIC TABLE SILVER.DT_CUSTOMERSALESAREATAX
-  COMMENT = 'Standard stream on SILVER.DT_CUSTOMERSALESAREATAX; drained only by CHANGES.SP_DRAIN_CHANGES.';
+EXECUTE IMMEDIATE $$
+BEGIN
+  SELECT 1 FROM CHANGES.STR_CUSTOMERSALESAREATAX LIMIT 0;   -- fails if missing, stale or its DT was replaced
+  RETURN 'STR_CUSTOMERSALESAREATAX healthy, kept';
+EXCEPTION
+  WHEN OTHER THEN
+    CREATE OR REPLACE STREAM CHANGES.STR_CUSTOMERSALESAREATAX
+      ON DYNAMIC TABLE SILVER.DT_CUSTOMERSALESAREATAX
+      COMMENT = 'Standard stream on SILVER.DT_CUSTOMERSALESAREATAX; drained only by CHANGES.SP_DRAIN_CHANGES.';
+    RETURN 'STR_CUSTOMERSALESAREATAX (re)created';
+END;
+$$;
 
 
 /* ---------------------------------------------------------------------------
